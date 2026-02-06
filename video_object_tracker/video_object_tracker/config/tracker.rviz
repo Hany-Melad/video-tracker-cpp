@@ -1,0 +1,16 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Plane Cell Count: 20
+      Reference Frame: world
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Trajectories
+      Topic:
+        Value: /trajectory_markers
+  Global Options:
+    Fixed Frame: world
+    Frame Rate: 30
