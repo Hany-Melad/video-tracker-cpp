@@ -1,100 +1,154 @@
+
+/**
+ * @file video_reader_node.cpp
+ * @brief ROS2 Node for reading and publishing video frames
+ * @author Hany Melad Sadak
+ * @date February 2025
+ * 
+ * This node reads frames from a video file and publishes them
+ * as ROS2 Image messages at a configurable frame rate.
+ */
+
+
 #include <chrono>
 #include <memory>
 #include <string>
-
-#include "rclcpp/rclcpp.hpp"
-#include "sensor_msgs/msg/image.hpp"
-
-#include <opencv2/opencv.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <cv_bridge/cv_bridge.hpp>
-using namespace std::chrono_literals;
+#include <opencv2/opencv.hpp>
 
-class VideoReaderNode : public rclcpp::Node
-{
+/**
+ * @class VideoPublisherNode
+ * @brief ROS2 node that publishes video frames
+ * 
+ * Reads video file using OpenCV and publishes frames
+ * to /video_frames topic at specified FPS.
+ */
+class VideoPublisherNode : public rclcpp::Node {
 public:
-    VideoReaderNode() : Node("video_reader_node")
-    {
+    /**
+     * @brief Constructor - initializes the video publisher
+     * 
+     * Opens video file and sets up timer for frame publishing.
+     */
+    VideoPublisherNode() : Node("video_publisher") {
+        
+        // ===========================================
+        // DECLARE ROS2 PARAMETERS
+        // ===========================================
+        // Parameters can be set from launch file or command line
+        
         this->declare_parameter<std::string>("video_path", "");
         this->declare_parameter<double>("fps", 30.0);
-        this->declare_parameter<bool>("loop", true);
         
-        video_path_ = this->get_parameter("video_path").as_string();
-        fps_ = this->get_parameter("fps").as_double();
-        loop_ = this->get_parameter("loop").as_bool();
+        // Get parameter values
+        std::string video_path = this->get_parameter("video_path").as_string();
+        double fps = this->get_parameter("fps").as_double();
         
-        if (video_path_.empty()) {
+        // ===========================================
+        // VALIDATE VIDEO PATH
+        // ===========================================
+        
+        if (video_path.empty()) {
             RCLCPP_ERROR(this->get_logger(), "No video path provided!");
-            RCLCPP_ERROR(this->get_logger(), "Use: -p video_path:=/path/to/video.mp4");
             return;
         }
         
-        cap_.open(video_path_);
+        // ===========================================
+        // OPEN VIDEO FILE
+        // ===========================================
+        
+        cap_.open(video_path);
         if (!cap_.isOpened()) {
-            RCLCPP_ERROR(this->get_logger(), "Cannot open video: %s", video_path_.c_str());
+            RCLCPP_ERROR(this->get_logger(), "Cannot open video: %s", video_path.c_str());
             return;
         }
         
-        width_ = (int)cap_.get(cv::CAP_PROP_FRAME_WIDTH);
-        height_ = (int)cap_.get(cv::CAP_PROP_FRAME_HEIGHT);
-        total_frames_ = (int)cap_.get(cv::CAP_PROP_FRAME_COUNT);
+        RCLCPP_INFO(this->get_logger(), "=== VIDEO PUBLISHER STARTED ===");
+        RCLCPP_INFO(this->get_logger(), "Video: %s", video_path.c_str());
+        RCLCPP_INFO(this->get_logger(), "FPS: %.1f", fps);
         
-        RCLCPP_INFO(this->get_logger(), "================================");
-        RCLCPP_INFO(this->get_logger(), "VIDEO READER NODE STARTED");
-        RCLCPP_INFO(this->get_logger(), "Video: %s", video_path_.c_str());
-        RCLCPP_INFO(this->get_logger(), "Resolution: %dx%d", width_, height_);
-        RCLCPP_INFO(this->get_logger(), "Total Frames: %d", total_frames_);
-        RCLCPP_INFO(this->get_logger(), "FPS: %.1f", fps_);
-        RCLCPP_INFO(this->get_logger(), "================================");
+        // ===========================================
+        // CREATE PUBLISHER
+        // ===========================================
+        // Publishes to /video_frames topic
+        // Queue size 10: buffers up to 10 messages
         
-        pub_ = this->create_publisher<sensor_msgs::msg::Image>("video_frames", 10);
+        image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+            "/video_frames", 10);
         
-        double period_ms = 1000.0 / fps_;
+        // ===========================================
+        // CREATE TIMER
+        // ===========================================
+        // Timer triggers frame publishing at desired FPS
+        // Period = 1000ms / FPS (e.g., 25 FPS = 40ms period)
+        
+        int period_ms = static_cast<int>(1000.0 / fps);
         timer_ = this->create_wall_timer(
-            std::chrono::milliseconds((int)period_ms),
-            std::bind(&VideoReaderNode::timer_callback, this));
+            std::chrono::milliseconds(period_ms),
+            std::bind(&VideoPublisherNode::publishFrame, this));
     }
 
 private:
-    void timer_callback()
-    {
+    /**
+     * @brief Timer callback - reads and publishes one frame
+     * 
+     * Called periodically based on FPS setting.
+     * Loops video when reaching the end.
+     */
+    void publishFrame() {
         cv::Mat frame;
+        
+        // ===========================================
+        // READ FRAME FROM VIDEO
+        // ===========================================
+        
         if (!cap_.read(frame)) {
-            if (loop_) {
-                cap_.set(cv::CAP_PROP_POS_FRAMES, 0);
-                cap_.read(frame);
-                RCLCPP_INFO(this->get_logger(), "Video looped");
-            } else {
-                RCLCPP_INFO(this->get_logger(), "Video ended");
-                timer_->cancel();
+            // End of video reached - loop back to beginning
+            cap_.set(cv::CAP_PROP_POS_FRAMES, 0);
+            
+            if (!cap_.read(frame)) {
+                RCLCPP_ERROR(this->get_logger(), "Cannot read frame!");
                 return;
             }
+            RCLCPP_INFO(this->get_logger(), "Video looped");
         }
         
-        auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", frame).toImageMsg();
-        msg->header.stamp = this->now();
-        msg->header.frame_id = "camera";
-        pub_->publish(*msg);
+        // ===========================================
+        // CONVERT AND PUBLISH
+        // ===========================================
+        // Use cv_bridge to convert OpenCV Mat to ROS2 Image message
         
-        frame_count_++;
-        if (frame_count_ % 100 == 0) {
-            RCLCPP_INFO(this->get_logger(), "Published frame %d / %d", frame_count_, total_frames_);
-        }
+        auto msg = cv_bridge::CvImage(
+            std_msgs::msg::Header(),  // Empty header (will fill below)
+            "bgr8",                   // Encoding: Blue-Green-Red, 8-bit
+            frame                     // OpenCV image data
+        ).toImageMsg();
+        
+        // Set message header
+        msg->header.stamp = this->now();      // Current timestamp
+        msg->header.frame_id = "camera";      // Reference frame
+        
+        // Publish message
+        image_pub_->publish(*msg);
     }
     
-    std::string video_path_;
-    double fps_;
-    bool loop_;
-    cv::VideoCapture cap_;
-    int width_ = 0, height_ = 0, total_frames_ = 0;
-    int frame_count_ = 0;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
-    rclcpp::TimerBase::SharedPtr timer_;
+    // ===========================================
+    // MEMBER VARIABLES
+    // ===========================================
+    
+    cv::VideoCapture cap_;   // OpenCV video capture object
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;  // ROS2 publisher
+    rclcpp::TimerBase::SharedPtr timer_;  // Timer for periodic publishing
 };
 
-int main(int argc, char* argv[])
-{
+/**
+ * @brief Main function - ROS2 node entry point
+ */
+int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<VideoReaderNode>());
+    rclcpp::spin(std::make_shared<VideoPublisherNode>());
     rclcpp::shutdown();
     return 0;
 }
